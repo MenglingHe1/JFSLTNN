@@ -17,7 +17,7 @@ ip = inputParser;
 ip.addParamValue('Tol', 1e-6, @isscalar);
 ip.addParamValue('Alg', 'SVD', @ischar);
 ip.addParamValue('Rank', [], @ismatrix);
-ip.addParamValue('MaxIter', 20, @isscalar);
+ip.addParamValue('MaxIter', 10, @isscalar);
 ip.parse(varargin{2:end});
 
 Tol = ip.Results.Tol;
@@ -503,11 +503,12 @@ if is_array(varargin{1})
     
     if strcmp(Alg,'SGD')
         %         rng('default');
-        adam = 0;
+        sgdmethod = 'Adam';
         lrate = 0.001;    % learning rate
-        momentum = 0.5;  % forget rate
+        beta1 = 0.9;
+        beta2 = 0.999;
         
-        
+        momentum = 0.5;  % forget rate 
         winsz = 0.001;    % sample ratio for error evaluation
         mu = 0.1;        % constant for diagnoal hessian matrix
         c=varargin{1};
@@ -518,28 +519,20 @@ if is_array(varargin{1})
         gradnode=cell(1,d);
         r=Rank(:);
         r(d+1) = r(1);
-        for i=1:d-1
-            node{i}=randn(r(i),n(i),r(i+1));
-            gradnode{i}=zeros(r(i),n(i),r(i+1));
-        end
-        node{d}=randn(r(d),n(d),r(1));
-        gradnode{d}=zeros(r(d),n(d),r(1));
-        
         for i=1:d
+            node{i} = rand(r(i),n(i),r(i+1));
+            node{i} = node{i} - mean(node{i}(:));    
             node{i} = node{i}./max(abs(node{i}(:)));
+            gradnode{i} = zeros(r(i),n(i),r(i+1));
         end
-        
-        
-        m_t = node;
-        v_t = node;
+        node=TR_initcoreten(n,r);
+        m_t = cell(1,d);
+        v_t = cell(1,d);
         for i=1:d
-            m_t{i} = m_t{i}.*0;
-            v_t{i} = v_t{i}.*0;
+            m_t{i} = zeros(size(node{i}));
+            v_t{i} = zeros(size(node{i}));
         end
-        beta1 = 0.9;
-        beta2 = 0.9999;
-        
-        
+
         rmse=[];
         perr = ones(1,max(round(prod(n)*winsz),100)); it=0;
         
@@ -557,6 +550,7 @@ if is_array(varargin{1})
                 I(j)=randsample(n(j),1);
             end
             
+            
             % compute stochastic gradient
             for j=1:d
                 b = 1;
@@ -571,28 +565,40 @@ if is_array(varargin{1})
                 g1 = b'* perr(cur); 
                 
                 
-                if adam ~= 1
+                if strcmp(sgdmethod, 'Hessian')
                     g2 = g1./(b'.^2 + mu);
                     g2 = reshape(g2, [r(j),1,r(j+1)]);
                     gradnode{j}(:,I(j),:) = momentum * gradnode{j}(:,I(j),:)+ lrate * g2;
-                else
+                end
+                if strcmp(sgdmethod, 'Adadelta')
                     g1 = reshape(g1,[r(j),1,r(j+1)]);
-                    m_t{j}(:,I(j),:) = beta1 * m_t{j}(:,I(j),:) + (1-beta1) * g1;
                     v_t{j}(:,I(j),:) = beta2 * v_t{j}(:,I(j),:) + (1-beta2) * (g1.^2);
-                   % m_t{j}(:,I(j),:) = m_t{j}(:,I(j),:)./(1-beta1^it);
-                   % v_t{j}(:,I(j),:) = v_t{j}(:,I(j),:)./(1-beta2^it);
+                    gradnode{j}(:,I(j),:) =  (sqrt(m_t{j}(:,I(j),:)) + 1e-8) .* g1 ./ (sqrt(v_t{j}(:,I(j),:)) + 1e-8);
+                    m_t{j}(:,I(j),:) = beta2 * m_t{j}(:,I(j),:) + (1-beta2) * (gradnode{j}(:,I(j),:).^2);
+                end
+                if strcmp(sgdmethod, 'RMSprop')
+                    g1 = reshape(g1,[r(j),1,r(j+1)]);
+                    v_t{j}(:,I(j),:) =  beta2 * v_t{j}(:,I(j),:) + (1-beta2) * (g1.^2);
+                    gradnode{j}(:,I(j),:) = lrate * g1 ./ (sqrt(v_t{j}(:,I(j),:)) + 1e-8);
+                end
+                if strcmp(sgdmethod,'Adam')
+                    g1 = reshape(g1,[r(j),1,r(j+1)]);
+                    m_t{j}(:,I(j),:) =  beta1 * m_t{j}(:,I(j),:) + (1-beta1) * g1;
+                    v_t{j}(:,I(j),:) =  beta2 * v_t{j}(:,I(j),:) + (1-beta2) * (g1.^2);
+                   % m_t{j}(:,I(j),:) = m_t{j}(:,I(j),:)./(1-beta1.^(it+1));
+                   % v_t{j}(:,I(j),:) = v_t{j}(:,I(j),:)./(1-beta2.^(it+1));
                     gradnode{j}(:,I(j),:) = lrate * m_t{j}(:,I(j),:) ./ (sqrt(v_t{j}(:,I(j),:)) + 1e-8);
                 end
+                
             end
             
-            % gradient descent
+% %             % gradient descent
             for j=1:d
-                curnode = node{j}(:,I(j),:);
-                grad = gradnode{j}(:,I(j),:);
-                curnode =  curnode -  grad - 1e-6 * curnode;
-                node{j}(:,I(j),:) = curnode;
+                node{j}(:,I(j),:) = node{j}(:,I(j),:) - gradnode{j}(:,I(j),:);
             end
-            
+
+    
+
             totalgrad=0;
             for i=1:d
                 totalgrad = totalgrad + sqrt(sum(gradnode{i}(:).^2));
@@ -600,24 +606,39 @@ if is_array(varargin{1})
      
             
             
-            if (mod(it,10000)==0 || it ==1)
+            if (mod(it,1e4)==0 || it ==1)
                 fprintf('it:%d, err=%6f, totalgrad=%3.1e\n',it, sqrt(mean(perr.^2)),totalgrad);
                 
 %                 tr=tensor_ring;
 %                 tr=cell2core(tr,node);
 %                 rmse = [rmse,norm(c(:)-full(tr))/sqrt(numel(c))];
 %                 fprintf('it:%d, err=%6f, rmse= %6f\n',it, sqrt(mean(perr.^2)), rmse(end));
-            end
-            
-            if totalgrad < 1e-6 && it>100
+             end
+             
+            if totalgrad < 1e-12 && it>100
                disp('Gradient is too small');
                break;
             end
             
-            if it > 1e6
-                disp('Reaching Maximum iteration!!!');
+%             if (mod(it,1.5e6)==0||it==0.5e6||it==1e6)
+%              %if (mod(it,1e6)==0||it==4e5||it==6e5||it==8e5||it==1e6||it==1.2e6||it==1.4e6||it==1.6e6||it==1.8e6)
+%              tr=tensor_ring;
+%              tr=cell2core(tr,node);
+%              fprintf('Calculating RSE...\n');
+%              full_tr=full(tr);
+%              err = c(:) - full_tr;
+%              RSE = sqrt(sum(err.^2)/sum(c(:).^2)) 
+%               fprintf('Save node to mat file at iter: %d\n\n',it);
+%                   file_name = [ 'rank',num2str(r(1)),'_cifar05kiter_',  num2str(it),  '.mat' ];
+%                   save( file_name, 'node','RSE','it','tr','full_tr','lrate');  
+%              end
+            
+             
+              if it==MaxIter
+           %if it > max(prod(n)*5,1e5)
+                disp(['Learning rate is: : ',num2str(lrate)]);
                 break;
-            end
+              end
             
         end
         
@@ -632,9 +653,10 @@ if is_array(varargin{1})
     
     if strcmp(Alg,'BSGD')
         rng('default');
-        lrate = 0.01;        % learning rate
-        momentum = 0.1;      % forget rate
-        batchsize = 100;     % batch sample size
+        lrate = 0.001;        % learning rate
+        beta1 = 0.9;
+        beta2 = 0.999;
+        batchsize = 1000;     % batch sample size
         
         c=varargin{1};
         n=size(c);
@@ -645,23 +667,27 @@ if is_array(varargin{1})
         node=cell(1,d);
         gradnode=cell(1,d);
         r=Rank(:);
-        for i=1:d-1
+        r(d+1) = r(1);
+        for i=1:d
             node{i}=randn(r(i),n(i),r(i+1));
             gradnode{i}=zeros(r(i),n(i),r(i+1));
-        end
-        node{d}=randn(r(d),n(d),r(1));
-        gradnode{d}=zeros(r(d),n(d),r(1));
-        
-        for i=1:d
             node{i} = node{i}./max(abs(node{i}(:)));
         end
+        
+        
+        m_t = cell(1,d);
+        v_t = cell(1,d);
+        for i=1:d
+            m_t{i} = zeros(size(node{i}));
+            v_t{i} = zeros(size(node{i}));
+        end
+
         
         rmse = [];
         perr = ones(1,1000); it=0;
         num=cell(1,d);
         while  sqrt(mean(perr.^2)) > Tol
             it = it+1;
-            oldgradnode = gradnode;
             
             for i=1:d
                 num{i} = zeros(1,n(i));
@@ -684,34 +710,40 @@ if is_array(varargin{1})
                 for j=1:d
                     b = 1;
                     for k=[j+1:d,1:j-1]
-                        b = squeeze(b) * squeeze(node{k}(:,I(k),:));
+                        b = b * reshape(node{k}(:,I(k),:),[r(k),r(k+1)]);
                     end
                     if j==1
-                        chat = trace(squeeze(node{j}(:,I(j),:))*squeeze(b));
+                        chat = trace(reshape(node{j}(:,I(j),:),[r(j),r(j+1)])*b);
                         sidx = num2cell(I);
                         perr = circshift(perr,1);
                         perr(1) = chat - c(sidx{:});
                     end
-                    gradnode{j}(:,I(j),:) = squeeze(gradnode{j}(:,I(j),:)) + b'* perr(1);
+                    g1 = b'* perr(1);
+                    g1 = reshape(g1,[r(j),1,r(j+1)]); 
+                    gradnode{j}(:,I(j),:) = gradnode{j}(:,I(j),:) + g1;
                 end
             end
             
             for j=1:d
                 num{j}(num{j}==0) = 1;
                 gradnode{j} = gradnode{j} ./ repmat(num{j},[size(gradnode{j},1),1,size(gradnode{j},3)]);
-                gradnode{j} = momentum * oldgradnode{j} + lrate * gradnode{j};
+                m_t{j} = beta1 * m_t{j} + (1-beta1) * gradnode{j};
+                v_t{j} = beta2 * v_t{j} + (1-beta2) * (gradnode{j}.^2);
+              %  m_t{j} = m_t{j}./(1-beta1.^it);
+              %  v_t{j} = v_t{j}./(1-beta2.^it);
+                gradnode{j} = lrate * m_t{j} ./ (sqrt(v_t{j}) + 1e-8);
+                % gradient descent
+                node{j} = node{j} - gradnode{j} - 1e-9 * node{j};  
             end
             
-            % gradient descent
-            for j=1:d
-                node{j} = node{j} - gradnode{j} - 1e-9 * node{j};
-            end
+
             
             if (mod(it*batchsize,10000)==0)
                 fprintf('It:%d, err=%6f\n', it, sqrt(mean(perr.^2)));
-                %                 tr=tensor_ring;
-                %                 tr=cell2core(tr,node);
-                %                 rmse = [rmse,norm(c(:)-full(tr))/sqrt(numel(c))];
+%                   tr=tensor_ring;
+%                   tr=cell2core(tr,node);
+%                   rmse = [rmse,norm(c(:)-full(tr))/sqrt(numel(c))];
+%                   fprintf('it:%d, err=%6f, rmse= %6f\n',it, sqrt(mean(perr.^2)), rmse(end));
             end
             
             
@@ -726,12 +758,12 @@ if is_array(varargin{1})
         t.node=node;
         t.d=d;
         t.n=n;
-        t.r=r;
+        t.r=r(1:d);
         return;
     end
     
     
-end;
+end
 
 
 
